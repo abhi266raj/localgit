@@ -16,8 +16,14 @@ public struct GitPlan: Codable, Equatable {
 
 public protocol FMClientProtocol {
     func isAvailable() -> Bool
-    func planAction(task: String, gitContext: String) async throws -> GitPlan
+    func planAction(task: String, gitContext: String, sessionHistory: String?) async throws -> GitPlan
     func planRecovery(task: String, failedCommand: String, exitCode: Int32, output: String, gitContext: String) async throws -> GitPlan
+}
+
+public extension FMClientProtocol {
+    func planAction(task: String, gitContext: String) async throws -> GitPlan {
+        return try await planAction(task: task, gitContext: gitContext, sessionHistory: nil)
+    }
 }
 
 public class AppleFMClient: FMClientProtocol {
@@ -170,16 +176,29 @@ public class AppleFMClient: FMClientProtocol {
         return outStr
     }
 
-    public func planAction(task: String, gitContext: String) async throws -> GitPlan {
-        let prompt = """
+    public func planAction(task: String, gitContext: String, sessionHistory: String? = nil) async throws -> GitPlan {
+        var sections: [String] = []
+
+        if let history = sessionHistory, !history.isEmpty {
+            sections.append("""
+            Previous Session History:
+            \(history)
+            """)
+        }
+
+        sections.append("""
         Repository State:
         \(gitContext)
+        """)
 
+        sections.append("""
         User Task:
         \(task)
 
         Provide the exact git command to execute.
-        """
+        """)
+
+        let prompt = sections.joined(separator: "\n\n")
         let raw = try executeFM(prompt: prompt)
         return parseResponse(raw)
     }

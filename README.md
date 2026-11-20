@@ -11,6 +11,8 @@
 - **100% Native Swift & Xcode Project**: Complete Swift architecture with `LocalGitCore`, `localgit` CLI target, and `LocalGitTests` unit tests. Fully compatible with both **Xcode** (`LocalGit.xcodeproj`) and **Swift Package Manager** (`Package.swift`).
 - **On-Device Apple Foundation Model**: Uses macOS's built-in Foundation Models (`/usr/bin/fm`). Zero cloud latency, zero external API keys, 100% private.
 - **Autonomous Execution**: By default, commands are executed immediately without prompting for permission.
+- **Clean Ephemeral History by Default**: Since local LLMs perform best without context pollution, conversation and task history are **automatically cleared upon task completion**.
+- **Optional Persistent History Flag**: Launch with `-H` or `--with-history` if you want subsequent tasks to retain awareness of prior tasks and executed commands in the same session.
 - **Self-Healing Error Recovery**: If a Git command fails (e.g., branch already exists, merge conflict, untracked changes, detached HEAD), `LocalGit` captures the exit code and `stderr`, hands it back to the Apple Foundation Model for diagnosis, and automatically executes the fix.
 - **Context-Aware**: Inspects branch names, recent commit logs, working tree status (`git status --short`), and remotes to ground the model.
 - **Interactive REPL & CLI**: Run as an interactive shell (`localgit`) with prompt or as a single-command one-liner.
@@ -108,6 +110,7 @@ Usage: localgit [options] [task...]
 
 Options:
   -a, --ask             Ask for confirmation before executing commands (default: run without permission)
+  -H, --with-history    Retain session task history across multiple tasks (default: cleared after each task)
   -r, --max-retries <n> Max self-healing recovery attempts upon error (default: 3)
   -v, --verbose         Print detailed model reasoning and context
   -C, --cwd <path>      Target directory of git repository

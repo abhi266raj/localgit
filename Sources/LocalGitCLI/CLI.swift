@@ -10,8 +10,13 @@ public enum CLI {
             UI.warning("Current directory is not a Git repository. You can say 'initialize git repository' to start.")
         }
 
-        print("\(UI.Style.dim)Type your task in plain English (e.g. 'stage all files and commit with feat: initial commit').")
-        print("Commands: 'status' (view git status), 'help', 'exit' or 'quit' to leave.\(UI.Style.reset)\n")
+        let historyModeStr = engine.withHistory
+            ? "\(UI.Style.brightGreen)Enabled (--with-history)\(UI.Style.reset)"
+            : "\(UI.Style.brightYellow)Cleared per task (Default)\(UI.Style.reset)"
+
+        print("\(UI.Style.dim)Session History: [\(historyModeStr)\(UI.Style.dim)]")
+        print("Type your task in plain English (e.g. 'stage all files and commit with feat: initial commit').")
+        print("Commands: 'status', 'history', 'clear', 'help', 'exit' or 'quit' to leave.\(UI.Style.reset)\n")
 
         while true {
             let curState = GitContextInspector.getGitState(cwd: engine.cwd)
@@ -46,9 +51,11 @@ public enum CLI {
                     - "show last 5 commits with graphs"
 
                   Special Commands:
-                    - \(UI.Style.cyan)status\(UI.Style.reset) : Show detailed git status
-                    - \(UI.Style.cyan)help\(UI.Style.reset)   : Show this help text
-                    - \(UI.Style.cyan)exit\(UI.Style.reset)   : Exit the agent
+                    - \(UI.Style.cyan)status\(UI.Style.reset)  : Show detailed git status
+                    - \(UI.Style.cyan)history\(UI.Style.reset) : View active session task history
+                    - \(UI.Style.cyan)clear\(UI.Style.reset)   : Manually wipe session history
+                    - \(UI.Style.cyan)help\(UI.Style.reset)    : Show this help text
+                    - \(UI.Style.cyan)exit\(UI.Style.reset)    : Exit the agent
 
                 """)
                 continue
@@ -60,6 +67,23 @@ public enum CLI {
                 continue
             }
 
+            if lower == "clear" || lower == "reset" {
+                engine.clearHistory()
+                UI.success("Session history wiped clean.")
+                continue
+            }
+
+            if lower == "history" {
+                if !engine.withHistory {
+                    UI.info("Default mode is active: task history is cleared after each task completion. Launch with -H or --with-history to retain history.")
+                } else if let hist = engine.formattedHistory() {
+                    print("\n\(UI.Style.bold)Session Task History:\(UI.Style.reset)\n\(hist)\n")
+                } else {
+                    UI.info("No tasks recorded in history yet.")
+                }
+                continue
+            }
+
             _ = await engine.executeTask(input)
         }
     }
@@ -68,6 +92,7 @@ public enum CLI {
         var autoConfirm = true
         var maxRetries = 3
         var verbose = false
+        var withHistory = false
         var cwd: String? = nil
         var taskTokens: [String] = []
 
@@ -84,6 +109,8 @@ public enum CLI {
                 }
             case "-v", "--verbose":
                 verbose = true
+            case "-H", "--with-history":
+                withHistory = true
             case "-C", "--cwd":
                 if i + 1 < args.count {
                     cwd = args[i + 1]
@@ -95,6 +122,7 @@ public enum CLI {
 
                 Options:
                   -a, --ask             Ask for confirmation before executing commands (default: run without permission)
+                  -H, --with-history    Retain session task history across multiple tasks (default: cleared after each task)
                   -r, --max-retries <n> Max self-healing recovery attempts upon error (default: 3)
                   -v, --verbose         Print detailed model reasoning and context
                   -C, --cwd <path>      Target directory of git repository
@@ -113,6 +141,7 @@ public enum CLI {
             maxRetries: maxRetries,
             autoConfirm: autoConfirm,
             verbose: verbose,
+            withHistory: withHistory,
             cwd: cwd
         )
 

@@ -1,24 +1,64 @@
 import Foundation
 
+public struct TaskRecord: Equatable {
+    public let task: String
+    public let executedCommands: [String]
+    public let success: Bool
+    public let explanation: String
+    public let timestamp: Date
+
+    public init(
+        task: String,
+        executedCommands: [String],
+        success: Bool,
+        explanation: String,
+        timestamp: Date = Date()
+    ) {
+        self.task = task
+        self.executedCommands = executedCommands
+        self.success = success
+        self.explanation = explanation
+        self.timestamp = timestamp
+    }
+}
+
 public class GitAgentEngine {
     public let fmClient: FMClientProtocol
     public let maxRetries: Int
     public let autoConfirm: Bool
     public let verbose: Bool
+    public let withHistory: Bool
     public let cwd: String?
+
+    public private(set) var sessionHistory: [TaskRecord] = []
 
     public init(
         fmClient: FMClientProtocol? = nil,
         maxRetries: Int = 3,
         autoConfirm: Bool = true,
         verbose: Bool = false,
+        withHistory: Bool = false,
         cwd: String? = nil
     ) {
         self.fmClient = fmClient ?? AppleFMClient()
         self.maxRetries = maxRetries
         self.autoConfirm = autoConfirm
         self.verbose = verbose
+        self.withHistory = withHistory
         self.cwd = cwd
+    }
+
+    public func clearHistory() {
+        sessionHistory.removeAll()
+    }
+
+    public func formattedHistory() -> String? {
+        guard withHistory, !sessionHistory.isEmpty else { return nil }
+        return sessionHistory.enumerated().map { index, record in
+            let cmds = record.executedCommands.isEmpty ? "None" : record.executedCommands.joined(separator: " && ")
+            let status = record.success ? "Success" : "Failed"
+            return "- Previous Task \(index + 1): \"\(record.task)\" [\(status)] -> Command: `\(cmds)`"
+        }.joined(separator: "\n")
     }
 
     public func checkPrerequisites() -> Bool {
@@ -38,27 +78,55 @@ public class GitAgentEngine {
 
         guard checkPrerequisites() else { return false }
 
+        var executedCommands: [String] = []
+        var finalSuccess = false
+        var lastExplanation = ""
+
+        defer {
+            if !withHistory {
+                // Default mode: local LLM history is cleared immediately once task is completed
+                clearHistory()
+            } else {
+                sessionHistory.append(TaskRecord(
+                    task: trimmed,
+                    executedCommands: executedCommands,
+                    success: finalSuccess,
+                    explanation: lastExplanation
+                ))
+            }
+        }
+
         // 1. Capture git context
         let gitState = GitContextInspector.getGitState(cwd: cwd)
         if verbose {
             UI.info("Inspected git state:\n\(gitState.toPromptContext())")
+            if let hist = formattedHistory() {
+                UI.info("Active session history:\n\(hist)")
+            }
         }
 
         // 2. Query Apple FM model
         UI.info("Consulting Apple Foundation Model for task: \(UI.Style.bold)'\(trimmed)'\(UI.Style.reset)...")
         let plan: GitPlan
         do {
-            plan = try await fmClient.planAction(task: trimmed, gitContext: gitState.toPromptContext())
+            plan = try await fmClient.planAction(
+                task: trimmed,
+                gitContext: gitState.toPromptContext(),
+                sessionHistory: formattedHistory()
+            )
         } catch {
             UI.error("Failed to query Apple Foundation Model: \(error.localizedDescription)")
             return false
         }
+
+        lastExplanation = plan.explanation
 
         if plan.command.isEmpty {
             UI.warning("Model concluded no git command is necessary for this task.")
             if !plan.explanation.isEmpty {
                 print("Explanation: \(plan.explanation)")
             }
+            finalSuccess = true
             return true
         }
 
@@ -80,6 +148,7 @@ public class GitAgentEngine {
         }
 
         UI.executingMsg(currentCmd)
+        executedCommands.append(currentCmd)
         let result = CommandExecutor.execute(command: currentCmd, cwd: cwd)
 
         // 4. Handle result
@@ -89,6 +158,7 @@ public class GitAgentEngine {
             }
             UI.success("Command executed successfully!")
             printPostState()
+            finalSuccess = true
             return true
         }
 
@@ -119,6 +189,8 @@ public class GitAgentEngine {
                 return false
             }
 
+            lastExplanation = recoveryPlan.explanation
+
             if recoveryPlan.command.isEmpty {
                 UI.error("Model could not determine a recovery command.")
                 if !recoveryPlan.explanation.isEmpty {
@@ -143,6 +215,7 @@ public class GitAgentEngine {
             }
 
             UI.executingMsg(recoveryPlan.command)
+            executedCommands.append(recoveryPlan.command)
             lastFailedCmd = recoveryPlan.command
             lastResult = CommandExecutor.execute(command: recoveryPlan.command, cwd: cwd)
 
@@ -152,6 +225,7 @@ public class GitAgentEngine {
                 }
                 UI.success("Recovery successful on attempt \(attempt)! Goal achieved.")
                 printPostState()
+                finalSuccess = true
                 return true
             }
 

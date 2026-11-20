@@ -3,20 +3,22 @@ import XCTest
 
 final class MockFMClient: FMClientProtocol {
     var isAvailableResult: Bool = true
-    var planActionHandler: ((String, String) async throws -> GitPlan)?
+    var planActionHandler: ((String, String, String?) async throws -> GitPlan)?
     var planRecoveryHandler: ((String, String, Int32, String, String) async throws -> GitPlan)?
 
     var planActionCalls: Int = 0
     var planRecoveryCalls: Int = 0
+    var lastSessionHistoryPassed: String? = nil
 
     func isAvailable() -> Bool {
         return isAvailableResult
     }
 
-    func planAction(task: String, gitContext: String) async throws -> GitPlan {
+    func planAction(task: String, gitContext: String, sessionHistory: String?) async throws -> GitPlan {
         planActionCalls += 1
+        lastSessionHistoryPassed = sessionHistory
         if let handler = planActionHandler {
-            return try await handler(task, gitContext)
+            return try await handler(task, gitContext, sessionHistory)
         }
         return GitPlan(thought: "Mock thought", command: "echo 'mock success'", explanation: "Mock explanation")
     }
@@ -75,28 +77,56 @@ final class LocalGitTests: XCTestCase {
         XCTAssertEqual(plan.explanation, "Create and switch branch")
     }
 
-    func testEngineAutonomousSuccess() async {
+    func testEngineAutonomousSuccessWithoutHistoryByDefault() async {
         let mock = MockFMClient()
-        mock.planActionHandler = { task, ctx in
+        mock.planActionHandler = { task, ctx, hist in
             return GitPlan(thought: "Run status", command: "echo 'mock git status'", explanation: "Status test")
         }
 
         let engine = GitAgentEngine(
             fmClient: mock,
             maxRetries: 2,
-            autoConfirm: true // without permission
+            autoConfirm: true, // without permission
+            withHistory: false // Default mode: history cleared once task completes
         )
 
         let success = await engine.executeTask("check status")
         XCTAssertTrue(success)
         XCTAssertEqual(mock.planActionCalls, 1)
-        XCTAssertEqual(mock.planRecoveryCalls, 0)
+        XCTAssertNil(mock.lastSessionHistoryPassed)
+        // Default mode verifies history is cleared
+        XCTAssertTrue(engine.sessionHistory.isEmpty)
+    }
+
+    func testEngineRetainsHistoryWhenFlagEnabled() async {
+        let mock = MockFMClient()
+        mock.planActionHandler = { task, ctx, hist in
+            return GitPlan(thought: "Task step", command: "echo 'task step'", explanation: "Step")
+        }
+
+        let engine = GitAgentEngine(
+            fmClient: mock,
+            maxRetries: 2,
+            autoConfirm: true,
+            withHistory: true // Explicitly enabled with -H / --with-history
+        )
+
+        let firstSuccess = await engine.executeTask("first task")
+        XCTAssertTrue(firstSuccess)
+        XCTAssertEqual(engine.sessionHistory.count, 1)
+        XCTAssertEqual(engine.sessionHistory.first?.task, "first task")
+
+        let secondSuccess = await engine.executeTask("second task")
+        XCTAssertTrue(secondSuccess)
+        XCTAssertEqual(engine.sessionHistory.count, 2)
+        XCTAssertNotNil(mock.lastSessionHistoryPassed)
+        XCTAssertTrue(mock.lastSessionHistoryPassed!.contains("first task"))
     }
 
     func testEngineErrorRecovery() async {
         let mock = MockFMClient()
         // First command will fail
-        mock.planActionHandler = { task, ctx in
+        mock.planActionHandler = { task, ctx, hist in
             return GitPlan(thought: "Failing attempt", command: "sh -c 'echo \"mock fatal\" >&2 && exit 1'", explanation: "Fail")
         }
         // Recovery command will succeed
