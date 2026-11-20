@@ -29,6 +29,7 @@ public extension FMClientProtocol {
 
 public class AppleFMClient: FMClientProtocol {
     public let binaryPath: String
+    public let serverBaseURL: String?
     private var schemaPath: String?
 
     public static let defaultInstructions = """
@@ -51,11 +52,15 @@ public class AppleFMClient: FMClientProtocol {
     Keep it concise (1-2 sentences). Do not use markdown code fences.
     """
 
-    public init(binaryPath: String = "/usr/bin/fm") {
+    public init(binaryPath: String = "/usr/bin/fm", serverBaseURL: String? = "http://127.0.0.1:1976") {
         self.binaryPath = binaryPath
+        self.serverBaseURL = serverBaseURL
     }
 
     public func isAvailable() -> Bool {
+        if isServerOnline() {
+            return true
+        }
         guard FileManager.default.fileExists(atPath: binaryPath) else { return false }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binaryPath)
@@ -71,6 +76,62 @@ public class AppleFMClient: FMClientProtocol {
         } catch {
             return false
         }
+    }
+
+    public func isServerOnline() -> Bool {
+        guard let base = serverBaseURL, let url = URL(string: "\(base)/health") else { return false }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 0.5
+        let semaphore = DispatchSemaphore(value: 0)
+        var online = false
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                online = true
+            }
+            semaphore.signal()
+        }.resume()
+        _ = semaphore.wait(timeout: .now() + 0.6)
+        return online
+    }
+
+    private func queryServer(systemPrompt: String, userPrompt: String) throws -> String? {
+        guard isServerOnline(), let base = serverBaseURL, let url = URL(string: "\(base)/v1/chat/completions") else {
+            return nil
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 30.0
+
+        let body: [String: Any] = [
+            "model": "system",
+            "stream": false,
+            "messages": [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": userPrompt]
+            ]
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var resultText: String? = nil
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            defer { semaphore.signal() }
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let choices = json["choices"] as? [[String: Any]],
+                  let first = choices.first,
+                  let message = first["message"] as? [String: Any],
+                  let content = message["content"] as? String else {
+                return
+            }
+            resultText = content
+        }.resume()
+
+        _ = semaphore.wait(timeout: .now() + 35.0)
+        return resultText
     }
 
     private func ensureSchemaPath() throws -> String {
@@ -151,6 +212,12 @@ public class AppleFMClient: FMClientProtocol {
     }
 
     private func executeFM(prompt: String, instructions: String, schema: String? = nil) throws -> String {
+        // Check if server is running first
+        if let serverResponse = try? queryServer(systemPrompt: instructions, userPrompt: prompt) {
+            return serverResponse
+        }
+
+        // Otherwise fallback to local CLI
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binaryPath)
 
@@ -209,7 +276,8 @@ public class AppleFMClient: FMClientProtocol {
         User Task:
         \(task)
 
-        Provide the exact git command to execute. Include your reasoning in the 'thought' field.
+        Provide the exact git command to execute. Include your reasoning in the 'thought' field. Output JSON format:
+        {"thought": "...", "command": "...", "explanation": "..."}
         """)
 
         let prompt = sections.joined(separator: "\n\n")
@@ -243,7 +311,8 @@ public class AppleFMClient: FMClientProtocol {
         Updated Repository State:
         \(gitContext)
 
-        Diagnose the exact root cause of this failure in 'thought' and provide the corrected git command in 'command' to fix the issue and achieve the goal.
+        Diagnose the exact root cause of this failure in 'thought' and provide the corrected git command in 'command' to fix the issue and achieve the goal. Output JSON format:
+        {"thought": "...", "command": "...", "explanation": "..."}
         """
         let raw = try executeFM(prompt: prompt, instructions: AppleFMClient.defaultInstructions, schema: schema)
         return parseResponse(raw)

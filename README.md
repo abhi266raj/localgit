@@ -1,150 +1,151 @@
 # LocalGit 🤖🍏 (Swift & Xcode)
 
-> **Autonomous Git Agent Harness Written in Swift, Powered by Local Apple Foundation Models (`fm`)**
+> **Autonomous Git Agent Harness in Swift, Powered by Local Apple Foundation Models (`fm`)**
 
-`LocalGit` is a native Swift CLI harness and Xcode project that turns natural language intent into executed, verified Git actions. Powered by Apple's on-device Foundation Models (`fm` CLI), it autonomously plans, executes, diagnoses errors, and self-heals without sending any code or prompts to the cloud.
-
----
-
-## 🌟 Key Features
-
-- **100% Native Swift & Xcode Project**: Complete Swift architecture with `LocalGitCore`, `localgit` CLI target, and `LocalGitTests` unit tests. Fully compatible with both **Xcode** (`LocalGit.xcodeproj`) and **Swift Package Manager** (`Package.swift`).
-- **On-Device Apple Foundation Model**: Uses macOS's built-in Foundation Models (`/usr/bin/fm`). Zero cloud latency, zero external API keys, 100% private.
-- **Autonomous Execution**: By default, commands are executed immediately without prompting for permission.
-- **Clean Ephemeral History by Default**: Since local LLMs perform best without context pollution, conversation and task history are **automatically cleared upon task completion**.
-- **Optional Persistent History Flag**: Launch with `-H` or `--with-history` if you want subsequent tasks to retain awareness of prior tasks and executed commands in the same session.
-- **Self-Healing Error Recovery**: If a Git command fails (e.g., branch already exists, merge conflict, untracked changes, detached HEAD), `LocalGit` captures the exit code and `stderr`, hands it back to the Apple Foundation Model for diagnosis, and automatically executes the fix.
-- **Context-Aware**: Inspects branch names, recent commit logs, working tree status (`git status --short`), and remotes to ground the model.
-- **Interactive REPL & CLI**: Run as an interactive shell (`localgit`) with prompt or as a single-command one-liner.
+`LocalGit` is a native Swift CLI harness and Xcode project that turns natural language intent into executed, verified Git actions. Powered by Apple's on-device Foundation Models (`fm`), it autonomously plans, executes, diagnoses errors, and self-heals without sending any code or prompts to external cloud APIs.
 
 ---
 
-## 🏗️ Architecture
+## 🌐 The Server-Connected Architecture: How the Server Does All the Work
+
+`LocalGit` is built on a client-server architecture where **the local Apple Foundation Model acts as the intelligent backend server**, while the Swift CLI operates as a lightweight terminal harness.
 
 ```mermaid
-flowchart TD
-    User([User Prompt / Task]) --> CLI[CLI / Interactive REPL]
-    CLI --> Harness[GitAgentEngine (Swift)]
-    Harness --> Inspector[GitContextInspector]
-    Inspector --> Context[(Branch, Status, Logs, Remotes)]
-    Context --> FM[AppleFMClient\n/usr/bin/fm respond]
-    FM --> JSON[Structured GitPlan\ncommand + explanation]
-    JSON --> Exec[CommandExecutor (Swift Process)]
-    Exec --> Run[Execute Git Command]
-    Run --> Success{Exit Code 0?}
-    Success -- Yes --> Done([✔ Success & State Summary])
-    Success -- No --> ErrorCapture[Capture Stderr & Code]
-    ErrorCapture --> Retries{Attempts < Max?}
-    Retries -- Yes --> FM_Heal[Apple FM Error Recovery\nDiagnose & Fix]
-    FM_Heal --> JSON
-    Retries -- No --> Fail([✖ Report Unresolved Error])
+sequenceDiagram
+    autonumber
+    actor User as 👤 Developer
+    participant Client as 🖥️ LocalGit CLI (Swift Harness)
+    participant Server as 🍏 Local FM Server (Apple Foundation Model)
+    participant Terminal as 💻 Shell / Git
+
+    User->>Client: "stage all changes and commit with feat: login"
+    Note over Client: In Yellow: User Input
+    Client->>Client: Inspect Git state (branch, status, logs)
+    
+    rect rgb(30, 20, 40)
+        Note over Client,Server: Step 1: Action Planning (Server-Side)
+        Client->>Server: Task + Git Context (+ Session History if enabled)
+        Server-->>Client: Plan: { thought, command, explanation }
+    end
+    
+    Note over Client: In Magenta: Model Thinking<br/>In Cyan: Executing Command
+    Client->>Terminal: Execute `git add . && git commit -m "feat: login"`
+    
+    alt Command Succeeded
+        Terminal-->>Client: Raw output (e.g. `[main abc1234] feat: login...`)
+        rect rgb(20, 35, 25)
+            Note over Client,Server: Step 2: Output Synthesis (Server-Side)
+            Client->>Server: Task + Executed Command + Raw Terminal Output
+            Server-->>Client: Synthesized user-friendly output
+        end
+        Note over Client: In Green: Synthesized Output
+        Client->>User: "Your changes were staged and committed with 'feat: login'!"
+    else Command Encountered an Error
+        Terminal-->>Client: Exit code != 0, stderr (e.g. conflict, detached HEAD)
+        Note over Client: In Red: Terminal Error Output
+        rect rgb(40, 20, 20)
+            Note over Client,Server: Self-Healing Error Recovery (Server-Side)
+            Client->>Server: Task + Failed Command + Error Output + State
+            Server-->>Client: Diagnostic Thought + Corrected Command
+        end
+        Note over Client: In Magenta: Diagnosis Thought<br/>In Cyan: Executing Fix
+        Client->>Terminal: Execute Corrected Command
+        Terminal-->>Client: Success Output
+        Client->>Server: Synthesize final output
+        Server-->>Client: User-friendly resolution summary
+        Note over Client: In Green: Synthesized Output
+        Client->>User: "Conflict resolved and commit finalized successfully."
+    end
 ```
 
----
-
-## 🛠️ Xcode & Swift Package Structure
-
-The repository contains:
-- **`LocalGit.xcodeproj`**: Full Xcode project for opening, editing, running, and debugging in Xcode.
-- **`project.yml`**: XcodeGen project spec used to generate and maintain `LocalGit.xcodeproj`.
-- **`Package.swift`**: Swift Package Manager manifest with library, executable, and test targets.
-- **`Sources/LocalGitCore/`**:
-  - `FMClient.swift`: Interface to Apple Foundation Models with schema validation and error recovery prompts.
-  - `GitContext.swift`: Git repository state inspector.
-  - `Executor.swift`: Command execution and safety filtering.
-  - `AgentEngine.swift`: Agent harness loop and self-healing error verification.
-  - `UI.swift`: ANSI color formatting and status messaging.
-- **`Sources/LocalGitCLI/`**:
-  - `main.swift`: Entry point.
-  - `CLI.swift`: Argument parser and interactive REPL.
-- **`Tests/LocalGitTests/`**:
-  - `LocalGitTests.swift`: Comprehensive unit tests.
-- **`localgit`**: Executable launcher for the compiled Swift binary.
+### Why the Server Connected Model?
+- **Cognitive Offloading**: The CLI contains zero hardcoded Git syntax rules. 100% of decision making, diagnosis, and command generation happens on the Foundation Model server.
+- **Dual Server Modes**:
+  1. **Persistent Server (`fm serve`)**: Run `fm serve --port 1976`. The server keeps the model resident in Apple Neural Engine / Unified Memory, providing ultra-low latency OpenAI-compatible completions at `http://127.0.0.1:1976/v1/chat/completions`.
+  2. **Direct CLI Daemon**: If the background server is offline, `LocalGit` automatically falls back to `/usr/bin/fm respond`, requiring no manual server configuration.
+- **Two-Step Execution Workflow**:
+  - **Step 1**: The server plans the exact Git command sequence.
+  - **Step 2**: The server synthesizes the raw terminal output into a friendly, clear summary to present to the user.
 
 ---
 
-## 🚀 Building & Running
+## 🎨 Visual Color Hierarchy
 
-### 1. In Xcode
-Open the project in Xcode:
+`LocalGit` strictly formats every stage in dedicated ANSI colors:
+- 👤 **User Task** (`Bright Yellow`): The user's goal or prompt.
+- 🧠 **Model Thinking** (`Bright Magenta`): The model's reasoning and diagnosis before executing.
+- ⚡ **Command Execution** (`Cyan`): The shell command being executed.
+- ✖ **Terminal Error** (`Bright Red`): Raw error output when a command fails.
+- 💬 **Synthesized Output** (`Bright Green`): The clean, final output synthesized by the model.
+
+---
+
+## 🧹 Session History & Clean State Management
+
+- **Default Mode (Clean Slate)**: Local models perform best without context pollution. Once a task completes, **task history is automatically cleared** (`clearHistory()`).
+- **Persistent History (`-H` / `--with-history`)**: When launched with `-H`, prior completed tasks and executed commands in the session are preserved and sent to the server for multi-task continuity.
+
+---
+
+## 🚀 Running & Global Installation
+
+### 1. From Any Directory in Bash
+`localgit` is installed in your `$PATH` (`~/.local/bin/localgit`):
+```bash
+# Works in any directory or bash script:
+localgit "create branch feature-x and switch to it"
+
+# Interactive REPL:
+localgit
+```
+
+### 2. Auto-Build on Source Changes
+The wrapper script in `localgit` automatically detects if any files in `Sources/` have changed and recompiles with `swift build` before running, ensuring you are always running the latest version.
+
+### 3. Open in Xcode
 ```bash
 open LocalGit.xcodeproj
 ```
-Select the `localgit` scheme, set any arguments if desired in **Product > Scheme > Edit Scheme...**, and press **Cmd + R** to run.
+Select the `localgit` scheme and press **Cmd + R** to run or debug.
 
-### 2. From Terminal via CLI Launcher
+### 4. Optional: Start Persistent Server for Max Speed
 ```bash
-# Interactive REPL session
-./localgit
-
-# Single-shot command (executes without permission)
-./localgit "create branch feature-auth and switch to it"
+fm serve --port 1976
 ```
+`LocalGit` will automatically detect the server and route completions over local HTTP for near-instant responses.
 
-### 3. Using Swift Package Manager
+---
+
+## 🧪 Testing
+
+Run the test suite covering execution, context extraction, schema parsing, and self-healing recovery:
 ```bash
-# Build
-swift build
-
-# Run
-swift run localgit "show current status"
-
-# Run tests
 swift test
 ```
 
-### 4. Install Globally
-```bash
-# Install to ~/.local/bin
-mkdir -p ~/.local/bin
-swift build -c release
-cp .build/release/localgit ~/.local/bin/localgit
-```
-
 ---
 
-## 💻 Usage & Options
+## 📂 Project Structure
 
 ```
-Usage: localgit [options] [task...]
-
-Options:
-  -a, --ask             Ask for confirmation before executing commands (default: run without permission)
-  -H, --with-history    Retain session task history across multiple tasks (default: cleared after each task)
-  -r, --max-retries <n> Max self-healing recovery attempts upon error (default: 3)
-  -v, --verbose         Print detailed model reasoning and context
-  -C, --cwd <path>      Target directory of git repository
-  -h, --help            Show this help information
+localgit/
+├── LocalGit.xcodeproj        # Native Xcode project
+├── project.yml               # XcodeGen specification
+├── Package.swift             # Swift Package Manager manifest
+├── localgit                  # Global bash launcher script (auto-recompiles)
+├── README.md                 # Documentation and architecture
+├── .gitignore                # Git ignore rules
+├── Tests/
+│   └── LocalGitTests/
+│       └── LocalGitTests.swift # XCTest unit tests
+└── Sources/
+    ├── LocalGitCore/
+    │   ├── AgentEngine.swift # Autonomous agent loop & error recovery
+    │   ├── FMClient.swift    # Dual-mode Apple FM Client (HTTP Server + CLI)
+    │   ├── GitContext.swift  # Repository state inspector
+    │   ├── Executor.swift    # Safe command executor
+    │   └── UI.swift          # Visual color formatting
+    └── LocalGitCLI/
+        ├── CLI.swift         # REPL & argument parser
+        └── main.swift        # Executable entrypoint
 ```
-
-### Interactive REPL Session Example
-```
-$ ./localgit
-
-  _                     _  ____ _ _   
- | |    ___   ___ __ _| |/ ___(_) |_ 
- | |   / _ \ / __/ _` | | |  _| | __|
- | |__| (_) | (_| (_| | | |_| | | |_ 
- |_____\___/ \___\__,_|_|\____|_|\__|
- Local Apple Foundation Model Git Agent in Swift (powered by `fm`)
-
-localgit (main) > stage all files and commit with feat: native swift harness
-ℹ Consulting Apple Foundation Model for task: 'stage all files and commit with feat: native swift harness'...
-🤖 Proposed Command: git add . && git commit -m "feat: native swift harness"
-   Explanation: Stages all changes and commits them with the given commit message.
-⚡ Executing (auto-run): git add . && git commit -m "feat: native swift harness"
-✔ Command executed successfully!
-↳ Current state: [branch: main] clean
-
-localgit (main) > exit
-```
-
----
-
-## 🔄 Self-Healing Error Recovery Flow
-
-When a command fails (e.g. branch conflicts, missing remotes, detached HEAD):
-1. `LocalGit` captures the exit code and `stderr` output.
-2. It sends the failure diagnosis back to the Apple Foundation Model along with the original user goal and updated git context.
-3. The model returns the corrected command.
-4. `LocalGit` executes the fix automatically, verifying up to `--max-retries` times until success.
