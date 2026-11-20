@@ -1,15 +1,11 @@
-#!/usr/bin/env python3
-"""LocalGit entrypoint script."""
+#!/bin/zsh
+set -e
 
-import sys
-import os
+DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN="$DIR/.build/debug/localgit"
 
-# Add package directory to sys.path so localgit can run directly
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
+if [ ! -f "$BIN" ]; then
+    (cd "$DIR" && swift build -c debug >/dev/null 2>&1)
+fi
 
-from localgit_harness.cli import main
-
-if __name__ == "__main__":
-    main()
+exec "$BIN" "$@"

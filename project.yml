@@ -1,0 +1,40 @@
+name: LocalGit
+options:
+  bundleIdPrefix: com.localgit
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+targets:
+  LocalGitCore:
+    type: framework
+    platform: macOS
+    sources:
+      - path: Sources/LocalGitCore
+    settings:
+      PRODUCT_NAME: LocalGitCore
+      SWIFT_VERSION: "5.9"
+      ENABLE_MODULE_VERIFIER: NO
+      DEFINES_MODULE: YES
+
+  localgit:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/LocalGitCLI
+    dependencies:
+      - target: LocalGitCore
+    settings:
+      PRODUCT_NAME: localgit
+      SWIFT_VERSION: "5.9"
+
+  LocalGitTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/LocalGitTests
+    dependencies:
+      - target: LocalGitCore
+    settings:
+      PRODUCT_NAME: LocalGitTests
+      SWIFT_VERSION: "5.9"
