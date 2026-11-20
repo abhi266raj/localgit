@@ -392,10 +392,19 @@ The wrapper script in `localgit` enables system-wide accessibility:
 
 ## 🚀 Running & Global Installation
 
-### 1. From Any Directory in Bash
-`localgit` is installed in your `$PATH` (`~/.local/bin/localgit`):
+### 1. One-Step Installation via Script
+Install `localgit` to your user `$PATH` (`~/.local/bin/localgit`):
 ```bash
-# Works in any directory or bash script:
+# Using the installer script:
+./install.sh
+
+# Or using Makefile:
+make install
+```
+
+### 2. From Any Directory in Bash
+Once installed, `localgit` works in any terminal, directory, or Bash script:
+```bash
 localgit "create branch feature-x and switch to it"
 
 # Interactive REPL:
@@ -435,6 +444,8 @@ localgit/
 ├── LocalGit.xcodeproj        # Native Xcode project
 ├── project.yml               # XcodeGen specification
 ├── Package.swift             # Swift Package Manager manifest
+├── Makefile                  # Build, test, and install targets
+├── install.sh                # 1-step installer to user $PATH
 ├── localgit                  # Global bash launcher script (auto-recompiles)
 ├── README.md                 # Documentation and architecture
 ├── .gitignore                # Git ignore rules

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Resolve the project directory even through symlinks
+# Resolve the physical project directory even through symlinks
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do
     DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
@@ -10,14 +10,14 @@ while [ -h "$SOURCE" ]; do
 done
 PROJECT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
-# Fallback to harness repository location if executed standalone
-if [ ! -f "$PROJECT_DIR/Package.swift" ]; then
-    PROJECT_DIR="/Users/abhiraj/Documents/harness"
+# Allow overriding repository location via LOCALGIT_HOME
+if [ -n "$LOCALGIT_HOME" ] && [ -f "$LOCALGIT_HOME/Package.swift" ]; then
+    PROJECT_DIR="$LOCALGIT_HOME"
 fi
 
 BIN="$PROJECT_DIR/.build/debug/localgit"
 
-# Ensure the binary exists and is up-to-date with latest source changes
+# Ensure the binary exists and auto-recompiles if sources have changed
 if [ ! -f "$BIN" ] || [ -n "$(find "$PROJECT_DIR/Sources" -newer "$BIN" 2>/dev/null)" ]; then
     (cd "$PROJECT_DIR" && swift build -c debug >/dev/null)
 fi
