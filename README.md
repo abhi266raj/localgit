@@ -58,7 +58,7 @@ sequenceDiagram
     end
 ```
 
-### Why the Server Connected Model?
+### Why the Server-Connected Model?
 - **Cognitive Offloading**: The CLI contains zero hardcoded Git syntax rules. 100% of decision making, diagnosis, and command generation happens on the Foundation Model server.
 - **Dual Server Modes**:
   1. **Persistent Server (`fm serve`)**: Run `fm serve --port 1976`. The server keeps the model resident in Apple Neural Engine / Unified Memory, providing ultra-low latency OpenAI-compatible completions at `http://127.0.0.1:1976/v1/chat/completions`.
@@ -66,6 +66,136 @@ sequenceDiagram
 - **Two-Step Execution Workflow**:
   - **Step 1**: The server plans the exact Git command sequence.
   - **Step 2**: The server synthesizes the raw terminal output into a friendly, clear summary to present to the user.
+
+---
+
+## 🔬 Under the Hood: How Swift Code Executes Terminal Commands
+
+This section explains the exact engineering mechanisms that bridge the high-level Swift codebase down to native terminal commands and process management.
+
+```mermaid
+flowchart TD
+    subgraph UserSpace["Terminal / User Interaction"]
+        CLI_Input["User Input: 'undo last commit'"] --> Launcher["localgit (Bash Launcher)"]
+    end
+
+    subgraph BuildPipeline["Compilation & Binary Execution"]
+        Launcher --> CheckBuild{"Sources newer than .build/debug/localgit?"}
+        CheckBuild -- Yes --> Recompile["swift build -c debug"]
+        CheckBuild -- No --> Binary["Execute Mach-O Binary (.build/debug/localgit)"]
+        Recompile --> Binary
+    end
+
+    subgraph SwiftCore["LocalGit Swift Core Engine"]
+        Binary --> CLI_Parser["CLI.swift: Argument Parsing / REPL Loop"]
+        CLI_Parser --> Engine["AgentEngine.swift: Lifecycle Coordinator"]
+        Engine --> Inspector["GitContextInspector (Process: git status/branch/log)"]
+        Engine --> ModelClient["AppleFMClient: HTTP (fm serve) or Process (/usr/bin/fm)"]
+        Engine --> Executor["CommandExecutor.swift: Safe Shell Execution"]
+    end
+
+    subgraph OS_Execution["macOS Kernel & Shell Subprocesses"]
+        Executor --> ForkExec["Process(): /bin/zsh -c '<git command>'"]
+        ForkExec --> Pipes["Standard Output & Error Pipes (FileHandle reading)"]
+        Pipes --> ExitCode["terminationStatus (0 = Success, >0 = Error)"]
+    end
+
+    ExitCode --> Engine
+```
+
+### 1. The Compilation Pipeline: Swift to Mach-O Binary
+- **Source Architecture**: The project is split into `LocalGitCore` (compiled as a framework/static library) and `LocalGitCLI` (an executable command-line target) via `Package.swift` and `project.yml`.
+- **Compiler Invocation**: When you run `swift build`, SwiftPM invokes `swiftc` and the Apple Clang toolchain (`/Applications/Xcode.app/.../Toolchains/XcodeDefault.xctoolchain`), compiling `.swift` source code into an optimized **native Apple Silicon (`arm64`) Mach-O binary** at:
+  ```
+  .build/debug/localgit
+  ```
+- **Dynamic Linking**: The binary links against `libSystem.B.dylib` and `libswiftCore.dylib`, allowing direct access to the Darwin operating system APIs and the Swift runtime.
+
+### 2. How Swift Executes Terminal Commands (`Foundation.Process`)
+In `Sources/LocalGitCore/Executor.swift`, Swift does not use slow or unsafe C `system()` calls. Instead, it uses **`Foundation.Process`** and Unix anonymous pipes:
+
+```swift
+public static func execute(command: String, cwd: String? = nil) -> ExecutionResult {
+    // 1. Instantiate the Process object
+    let process = Process()
+    
+    // 2. Set the executable binary to the user shell
+    process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    process.arguments = ["-c", command]
+
+    // 3. Set the current working directory to the target git repo
+    if let cwd = cwd {
+        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+    }
+
+    // 4. Attach anonymous pipes for standard output and error
+    let outPipe = Pipe()
+    let errPipe = Pipe()
+    process.standardOutput = outPipe
+    process.standardError = errPipe
+
+    // 5. Spawn the subprocess and wait for completion
+    try process.run()
+    process.waitUntilExit()
+
+    // 6. Read stream data from file handles into Swift strings
+    let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+    let stdout = String(data: outData, encoding: .utf8) ?? ""
+    let stderr = String(data: errData, encoding: .utf8) ?? ""
+
+    // 7. Check kernel exit status
+    return ExecutionResult(
+        command: command,
+        exitCode: process.terminationStatus,
+        stdout: stdout,
+        stderr: stderr,
+        combinedOutput: stdout + stderr
+    )
+}
+```
+
+### 3. How Swift Communicates with the Apple Foundation Model
+The client communicates with Apple Foundation Models using two distinct pathways in `Sources/LocalGitCore/FMClient.swift`:
+
+#### Pathway A: HTTP Client to `fm serve` (`URLSession`)
+When the server is active, Swift sends asynchronous HTTP POST requests to `http://127.0.0.1:1976/v1/chat/completions`:
+```swift
+var request = URLRequest(url: URL(string: "http://127.0.0.1:1976/v1/chat/completions")!)
+request.httpMethod = "POST"
+request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+
+let body: [String: Any] = [
+    "model": "system",
+    "stream": false,
+    "messages": [
+        ["role": "system", "content": systemPrompt],
+        ["role": "user", "content": userPrompt]
+    ]
+]
+request.httpBody = try JSONSerialization.data(withJSONObject: body)
+```
+
+#### Pathway B: Inter-Process Communication (IPC via `/usr/bin/fm respond`)
+If the HTTP server is not running, Swift spawns `/usr/bin/fm` with strict JSON schema constraints:
+```swift
+let process = Process()
+process.executableURL = URL(fileURLWithPath: "/usr/bin/fm")
+process.arguments = [
+    "respond",
+    "--no-stream",
+    "--schema", schemaFilePath,
+    "-i", systemInstructions,
+    prompt
+]
+```
+The output is captured through `Pipe` and decoded with `JSONDecoder` into a strongly-typed `GitPlan(thought: String, command: String, explanation: String)`.
+
+### 4. How the Bash Launcher (`localgit`) Integrates with the System
+The wrapper script in `localgit` enables system-wide accessibility:
+1. **Resolves Real Path**: Uses `readlink` to resolve symlinks if invoked from `~/.local/bin/localgit`.
+2. **Auto-Compiles on Code Edits**: Runs `find Sources -newer .build/debug/localgit`. If any Swift source file was modified, it recompiles with `swift build` before running.
+3. **Preserves Environment & Context**: Uses `exec "$BIN" "$@"` so process IDs, working directories (`$PWD`), and terminal pipes are passed directly to the Swift binary.
 
 ---
 
