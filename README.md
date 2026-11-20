@@ -69,6 +69,85 @@ sequenceDiagram
 
 ---
 
+## ⚙️ Compilation Deep Dive: How Swift Source Becomes a Local Binary
+
+This section explains the exact step-by-step compiler pipeline that transforms plain `.swift` text files into an Apple Silicon native Mach-O executable binary.
+
+```mermaid
+flowchart TD
+    subgraph Frontend["1. Swift Frontend (swiftc / swift-frontend)"]
+        Source[".swift Source Files\n(CLI.swift, AgentEngine.swift, etc.)"] --> LexParse["Lexing & Parsing"]
+        LexParse --> AST["Abstract Syntax Tree (AST)"]
+        AST --> Sema["Semantic Analysis & Type Checking\n(Validates Protocols, Types & Generics)"]
+    end
+
+    subgraph SIL_Stage["2. Swift Intermediate Language (SIL)"]
+        Sema --> RawSIL["Raw SIL Generation\n(Basic Structured Representation)"]
+        RawSIL --> SILOpt["SIL Optimization & ARC Pass\n(Definite Initialization, Inlining, Devirtualization)"]
+        SILOpt --> CanonicalSIL["Canonical SIL\n(Memory-Safe & Optimized)"]
+    end
+
+    subgraph Backend["3. LLVM Backend & Code Generation"]
+        CanonicalSIL --> IRGen["LLVM IR Generation (.ll)"]
+        IRGen --> LLVMOpt["LLVM Target-Specific Optimizations\n(Loop unrolling, dead code elimination)"]
+        LLVMOpt --> MachineCode["ARM64 Machine Code Generation (.s)"]
+        MachineCode --> ObjectFiles["Object Files (.o)\n(CLI.o, AgentEngine.o, FMClient.o)"]
+    end
+
+    subgraph Linking["4. Linker & Packaging (Apple ld64)"]
+        ObjectFiles --> Linker["Apple Linker (ld64)"]
+        Dylibs["Dynamic Libraries\nlibswiftCore.dylib\nlibswift_Concurrency.dylib\nFoundation.framework\nlibSystem.B.dylib"] --> Linker
+        Linker --> MachO["Mach-O 64-bit Executable Binary (arm64)\n.build/debug/localgit"]
+        MachO --> CodeSign["Ad-Hoc Code Signing (codesign --sign -)"]
+    end
+
+    subgraph Runtime["5. Execution by Darwin Kernel"]
+        CodeSign --> Kernel["Darwin Kernel (posix_spawn / execve)"]
+        Kernel --> Dyld["Dynamic Linker (/usr/lib/dyld)\nMaps Memory & Resolves Symbols"]
+        Dyld --> MainEntry["Entrypoint: @main / main.swift"]
+    end
+```
+
+### The 5 Phases of the Compilation Pipeline
+
+#### Phase 1: Lexing, Parsing, and Type Checking
+1. **Lexing**: The Swift compiler breaks characters in `CLI.swift`, `AgentEngine.swift`, etc. into tokens (`func`, `class`, identifiers, operators).
+2. **Parsing**: Tokens are formed into an **Abstract Syntax Tree (AST)**, verifying that grammar and syntax are valid.
+3. **Semantic Analysis & Type Checking**: The compiler resolves types, checks protocol conformance (`FMClientProtocol`), infers return types, and validates access control (`public`, `private(set)`).
+
+#### Phase 2: Swift Intermediate Language (SIL)
+Unlike C or C++, Swift introduces a domain-specific intermediate stage between the AST and LLVM called **SIL**:
+1. **Raw SIL (`swiftc -emit-silgen`)**: Represents the program in a basic control-flow graph.
+2. **Definite Initialization**: Ensures all properties and variables are initialized before use.
+3. **Automatic Reference Counting (ARC) Optimization**: The SIL optimizer analyzes object lifetimes and eliminates redundant `swift_retain` / `swift_release` operations.
+4. **Devirtualization**: Replaces dynamic method dispatch with direct static calls where possible.
+
+#### Phase 3: LLVM IR & Target Code Generation
+1. **LLVM IR Generation**: The Canonical SIL is translated into **LLVM Intermediate Representation** (`.ll`).
+2. **Apple Silicon Optimizations**: The LLVM backend applies hardware-specific optimizations targeting the Apple M-series chips (AArch64 instruction set, hardware registers `x0`–`x30`, NEON vectorization).
+3. **Object File Output**: Generates relocatable machine code object files (`.o`), such as `AgentEngine.o`, `FMClient.o`, and `CLI.o`.
+
+#### Phase 4: Linking & Mach-O Binary Assembly (`ld64`)
+The Apple linker (`ld64`) resolves external symbols and combines the individual object files into a single **Mach-O 64-bit executable binary**:
+- Sets the entry point to `_main` in `main.swift`.
+- Embeds load commands (`LC_LOAD_DYLINKER`, `LC_LOAD_DYLIB`) instructing macOS to load dynamic runtimes at launch:
+  ```
+  $ otool -L .build/debug/localgit
+  /System/Library/Frameworks/Foundation.framework/Versions/C/Foundation
+  /usr/lib/libSystem.B.dylib
+  /usr/lib/swift/libswiftCore.dylib
+  /usr/lib/swift/libswift_Concurrency.dylib
+  ```
+- **Code Signing**: macOS on Apple Silicon requires every executable to be signed before execution. SwiftPM automatically applies an ad-hoc signature (`codesign --sign -`) satisfying the Darwin kernel execution policy.
+
+#### Phase 5: Kernel Execution (`dyld`)
+When `./localgit` is invoked from terminal or a Bash script:
+1. The kernel invokes `posix_spawn()` / `execve()`.
+2. The macOS dynamic linker (`/usr/lib/dyld`) maps the Mach-O segments (`__TEXT` code, `__DATA` variables) into virtual memory.
+3. `dyld` binds runtime symbols (`libswift_Concurrency.dylib` for `async`/`await`) and jumps to the binary's entrypoint.
+
+---
+
 ## 🔬 Under the Hood: How Swift Code Executes Terminal Commands
 
 This section explains the exact engineering mechanisms that bridge the high-level Swift codebase down to native terminal commands and process management.
@@ -103,15 +182,7 @@ flowchart TD
     ExitCode --> Engine
 ```
 
-### 1. The Compilation Pipeline: Swift to Mach-O Binary
-- **Source Architecture**: The project is split into `LocalGitCore` (compiled as a framework/static library) and `LocalGitCLI` (an executable command-line target) via `Package.swift` and `project.yml`.
-- **Compiler Invocation**: When you run `swift build`, SwiftPM invokes `swiftc` and the Apple Clang toolchain (`/Applications/Xcode.app/.../Toolchains/XcodeDefault.xctoolchain`), compiling `.swift` source code into an optimized **native Apple Silicon (`arm64`) Mach-O binary** at:
-  ```
-  .build/debug/localgit
-  ```
-- **Dynamic Linking**: The binary links against `libSystem.B.dylib` and `libswiftCore.dylib`, allowing direct access to the Darwin operating system APIs and the Swift runtime.
-
-### 2. How Swift Executes Terminal Commands (`Foundation.Process`)
+### How Swift Executes Terminal Commands (`Foundation.Process`)
 In `Sources/LocalGitCore/Executor.swift`, Swift does not use slow or unsafe C `system()` calls. Instead, it uses **`Foundation.Process`** and Unix anonymous pipes:
 
 ```swift
@@ -155,7 +226,7 @@ public static func execute(command: String, cwd: String? = nil) -> ExecutionResu
 }
 ```
 
-### 3. How Swift Communicates with the Apple Foundation Model
+### How Swift Communicates with the Apple Foundation Model
 The client communicates with Apple Foundation Models using two distinct pathways in `Sources/LocalGitCore/FMClient.swift`:
 
 #### Pathway A: HTTP Client to `fm serve` (`URLSession`)
@@ -191,7 +262,7 @@ process.arguments = [
 ```
 The output is captured through `Pipe` and decoded with `JSONDecoder` into a strongly-typed `GitPlan(thought: String, command: String, explanation: String)`.
 
-### 4. How the Bash Launcher (`localgit`) Integrates with the System
+### How the Bash Launcher (`localgit`) Integrates with the System
 The wrapper script in `localgit` enables system-wide accessibility:
 1. **Resolves Real Path**: Uses `readlink` to resolve symlinks if invoked from `~/.local/bin/localgit`.
 2. **Auto-Compiles on Code Edits**: Runs `find Sources -newer .build/debug/localgit`. If any Swift source file was modified, it recompiles with `swift build` before running.
