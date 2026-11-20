@@ -1,11 +1,25 @@
-#!/bin/zsh
+#!/bin/bash
 set -e
 
-DIR="$(cd "$(dirname "$0")" && pwd)"
-BIN="$DIR/.build/debug/localgit"
+# Resolve the project directory even through symlinks
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+PROJECT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
-if [ ! -f "$BIN" ]; then
-    (cd "$DIR" && swift build -c debug >/dev/null 2>&1)
+# Fallback to harness repository location if executed standalone
+if [ ! -f "$PROJECT_DIR/Package.swift" ]; then
+    PROJECT_DIR="/Users/abhiraj/Documents/harness"
+fi
+
+BIN="$PROJECT_DIR/.build/debug/localgit"
+
+# Ensure the binary exists and is up-to-date with latest source changes
+if [ ! -f "$BIN" ] || [ -n "$(find "$PROJECT_DIR/Sources" -newer "$BIN" 2>/dev/null)" ]; then
+    (cd "$PROJECT_DIR" && swift build -c debug >/dev/null)
 fi
 
 exec "$BIN" "$@"
