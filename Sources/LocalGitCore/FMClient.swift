@@ -18,6 +18,7 @@ public protocol FMClientProtocol {
     func isAvailable() -> Bool
     func planAction(task: String, gitContext: String, sessionHistory: String?) async throws -> GitPlan
     func planRecovery(task: String, failedCommand: String, exitCode: Int32, output: String, gitContext: String) async throws -> GitPlan
+    func synthesizeOutput(task: String, executedCommand: String, exitCode: Int32, rawTerminalOutput: String) async throws -> String
 }
 
 public extension FMClientProtocol {
@@ -35,11 +36,19 @@ public class AppleFMClient: FMClientProtocol {
     Your mission is to translate user goals or errors into exact, correct Git commands.
 
     Rules:
-    1. The 'command' field MUST contain the exact command to run in the terminal (e.g., 'git add . && git commit -m "feat: add login"').
-    2. Chain multiple commands with '&&' if multiple steps are needed.
-    3. Every command must invoke 'git' or safe shell utilities needed for git operations.
-    4. If the task is already satisfied or cannot be done, explain in 'thought' and 'explanation' and set command to '' (empty string).
-    5. For error recovery: diagnose the root cause carefully (e.g. untracked conflicts, detached HEAD, missing upstream, existing branch) and generate the precise fix.
+    1. The 'thought' field MUST explain your reasoning and diagnosis.
+    2. The 'command' field MUST contain the exact command to run in the terminal (e.g., 'git add . && git commit -m "feat: add login"').
+    3. Chain multiple commands with '&&' if multiple steps are needed.
+    4. Every command must invoke 'git' or safe shell utilities needed for git operations.
+    5. If the task is already satisfied or cannot be done, explain in 'thought' and 'explanation' and set command to '' (empty string).
+    6. For error recovery: diagnose the root cause carefully (e.g. untracked conflicts, detached HEAD, missing upstream, existing branch) and generate the precise fix.
+    """
+
+    public static let outputSynthesisInstructions = """
+    You are an assistant reporting Git command execution results to the user.
+    Given the user's original task and the raw terminal output from the executed command:
+    Synthesize a clean, user-friendly explanation of what was done and the result.
+    Keep it concise (1-2 sentences). Do not use markdown code fences.
     """
 
     public init(binaryPath: String = "/usr/bin/fm") {
@@ -134,24 +143,28 @@ public class AppleFMClient: FMClientProtocol {
         let cmd = gitLines.first ?? ""
 
         return GitPlan(
-            thought: "Fallback command extraction",
+            thought: "Analyzing repository state and generating command",
             command: cmd,
             explanation: "Extracted git command directly from model response",
             rawResponse: rawText
         )
     }
 
-    private func executeFM(prompt: String) throws -> String {
-        let schema = try ensureSchemaPath()
+    private func executeFM(prompt: String, instructions: String, schema: String? = nil) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binaryPath)
-        process.arguments = [
+
+        var args = [
             "respond",
             "--no-stream",
-            "--schema", schema,
-            "-i", AppleFMClient.defaultInstructions,
-            prompt
+            "-i", instructions
         ]
+        if let s = schema {
+            args.append(contentsOf: ["--schema", s])
+        }
+        args.append(prompt)
+
+        process.arguments = args
 
         let outPipe = Pipe()
         let errPipe = Pipe()
@@ -177,6 +190,7 @@ public class AppleFMClient: FMClientProtocol {
     }
 
     public func planAction(task: String, gitContext: String, sessionHistory: String? = nil) async throws -> GitPlan {
+        let schema = try ensureSchemaPath()
         var sections: [String] = []
 
         if let history = sessionHistory, !history.isEmpty {
@@ -195,11 +209,11 @@ public class AppleFMClient: FMClientProtocol {
         User Task:
         \(task)
 
-        Provide the exact git command to execute.
+        Provide the exact git command to execute. Include your reasoning in the 'thought' field.
         """)
 
         let prompt = sections.joined(separator: "\n\n")
-        let raw = try executeFM(prompt: prompt)
+        let raw = try executeFM(prompt: prompt, instructions: AppleFMClient.defaultInstructions, schema: schema)
         return parseResponse(raw)
     }
 
@@ -210,6 +224,7 @@ public class AppleFMClient: FMClientProtocol {
         output: String,
         gitContext: String
     ) async throws -> GitPlan {
+        let schema = try ensureSchemaPath()
         let prompt = """
         An error occurred while attempting to satisfy the user goal.
 
@@ -228,9 +243,43 @@ public class AppleFMClient: FMClientProtocol {
         Updated Repository State:
         \(gitContext)
 
-        Diagnose the exact root cause of this failure and provide the corrected git command to fix the issue and achieve the goal.
+        Diagnose the exact root cause of this failure in 'thought' and provide the corrected git command in 'command' to fix the issue and achieve the goal.
         """
-        let raw = try executeFM(prompt: prompt)
+        let raw = try executeFM(prompt: prompt, instructions: AppleFMClient.defaultInstructions, schema: schema)
         return parseResponse(raw)
+    }
+
+    public func synthesizeOutput(
+        task: String,
+        executedCommand: String,
+        exitCode: Int32,
+        rawTerminalOutput: String
+    ) async throws -> String {
+        let prompt = """
+        User Goal:
+        \(task)
+
+        Executed Command:
+        \(executedCommand) (exit code \(exitCode))
+
+        Terminal Output:
+        \(rawTerminalOutput.isEmpty ? "(Command completed successfully with empty output)" : rawTerminalOutput)
+
+        Explain clearly what was done and the result to show to the user.
+        """
+        do {
+            let response = try executeFM(prompt: prompt, instructions: AppleFMClient.outputSynthesisInstructions)
+            let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        } catch {
+            // Fallback to formatted terminal output if synthesis fails
+        }
+
+        if !rawTerminalOutput.isEmpty {
+            return rawTerminalOutput
+        }
+        return "Command executed successfully."
     }
 }

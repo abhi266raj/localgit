@@ -78,6 +78,9 @@ public class GitAgentEngine {
 
         guard checkPrerequisites() else { return false }
 
+        // Format 1: Display User Input in separate color (Yellow)
+        UI.printUserInput(trimmed)
+
         var executedCommands: [String] = []
         var finalSuccess = false
         var lastExplanation = ""
@@ -96,7 +99,7 @@ public class GitAgentEngine {
             }
         }
 
-        // 1. Capture git context
+        // Capture git context
         let gitState = GitContextInspector.getGitState(cwd: cwd)
         if verbose {
             UI.info("Inspected git state:\n\(gitState.toPromptContext())")
@@ -105,8 +108,8 @@ public class GitAgentEngine {
             }
         }
 
-        // 2. Query Apple FM model
-        UI.info("Consulting Apple Foundation Model for task: \(UI.Style.bold)'\(trimmed)'\(UI.Style.reset)...")
+        // Step 1: Query Apple FM model to plan the action
+        UI.info("Consulting Apple Foundation Model for git command...")
         let plan: GitPlan
         do {
             plan = try await fmClient.planAction(
@@ -121,22 +124,19 @@ public class GitAgentEngine {
 
         lastExplanation = plan.explanation
 
+        // Format 2: Display Model Thinking in separate color (Magenta)
+        if !plan.thought.isEmpty {
+            UI.printThinking(plan.thought)
+        }
+
         if plan.command.isEmpty {
-            UI.warning("Model concluded no git command is necessary for this task.")
-            if !plan.explanation.isEmpty {
-                print("Explanation: \(plan.explanation)")
-            }
+            let directMsg = !plan.explanation.isEmpty ? plan.explanation : "No git command needed for this task."
+            // Format 3: Display Output in separate color (Green)
+            UI.printOutput(directMsg)
             finalSuccess = true
             return true
         }
 
-        UI.modelMsg(
-            thought: verbose ? plan.thought : "",
-            command: plan.command,
-            explanation: plan.explanation
-        )
-
-        // 3. Execute command (without permission by default)
         let currentCmd = plan.command
         if !autoConfirm {
             print("\(UI.Style.bold)Execute this command? [Y/n]: \(UI.Style.reset)", terminator: "")
@@ -147,30 +147,40 @@ public class GitAgentEngine {
             }
         }
 
-        UI.executingMsg(currentCmd)
+        // Execute command in terminal
+        UI.printCommand(currentCmd)
         executedCommands.append(currentCmd)
         let result = CommandExecutor.execute(command: currentCmd, cwd: cwd)
 
-        // 4. Handle result
+        // Handle success: Step 2 - Ask local LLM what output to show to the user
         if result.isSuccess {
-            if !result.combinedOutput.isEmpty {
-                print("\(UI.Style.dim)\(result.combinedOutput)\(UI.Style.reset)")
+            let outputToShow: String
+            do {
+                outputToShow = try await fmClient.synthesizeOutput(
+                    task: trimmed,
+                    executedCommand: currentCmd,
+                    exitCode: result.exitCode,
+                    rawTerminalOutput: result.combinedOutput
+                )
+            } catch {
+                outputToShow = !result.combinedOutput.isEmpty ? result.combinedOutput : "Command completed successfully."
             }
-            UI.success("Command executed successfully!")
+
+            // Format 3: Display Output in separate color (Green)
+            UI.printOutput(outputToShow)
             printPostState()
             finalSuccess = true
             return true
         }
 
-        // Failure - start self-healing recovery loop
-        UI.error("Command exited with code \(result.exitCode)")
-        if !result.combinedOutput.isEmpty {
-            print("\(UI.Style.brightRed)\(result.combinedOutput)\(UI.Style.reset)")
-        }
+        // If error is there: Show error from message (in Red)
+        let errorMsg = !result.combinedOutput.isEmpty ? result.combinedOutput : "Command exited with error code \(result.exitCode)"
+        UI.printTerminalError(errorMsg)
 
         var lastFailedCmd = currentCmd
         var lastResult = result
 
+        // Recovery loop: diagnose with model and retry
         for attempt in 1...maxRetries {
             UI.retryMsg(attempt: attempt, maxRetries: maxRetries)
             let updatedState = GitContextInspector.getGitState(cwd: cwd)
@@ -191,19 +201,18 @@ public class GitAgentEngine {
 
             lastExplanation = recoveryPlan.explanation
 
+            // Format 2: Display Model Thinking during diagnosis (Magenta)
+            if !recoveryPlan.thought.isEmpty {
+                UI.printThinking(recoveryPlan.thought)
+            }
+
             if recoveryPlan.command.isEmpty {
                 UI.error("Model could not determine a recovery command.")
                 if !recoveryPlan.explanation.isEmpty {
-                    print("Model note: \(recoveryPlan.explanation)")
+                    UI.printOutput(recoveryPlan.explanation)
                 }
                 return false
             }
-
-            UI.modelMsg(
-                thought: verbose ? recoveryPlan.thought : "",
-                command: recoveryPlan.command,
-                explanation: recoveryPlan.explanation
-            )
 
             if !autoConfirm {
                 print("\(UI.Style.bold)Execute fix command? [Y/n]: \(UI.Style.reset)", terminator: "")
@@ -214,25 +223,36 @@ public class GitAgentEngine {
                 }
             }
 
-            UI.executingMsg(recoveryPlan.command)
+            // Execute recovery command in terminal
+            UI.printCommand(recoveryPlan.command)
             executedCommands.append(recoveryPlan.command)
             lastFailedCmd = recoveryPlan.command
             lastResult = CommandExecutor.execute(command: recoveryPlan.command, cwd: cwd)
 
             if lastResult.isSuccess {
-                if !lastResult.combinedOutput.isEmpty {
-                    print("\(UI.Style.dim)\(lastResult.combinedOutput)\(UI.Style.reset)")
+                // Step 2: Ask local LLM what output to show to the user
+                let outputToShow: String
+                do {
+                    outputToShow = try await fmClient.synthesizeOutput(
+                        task: trimmed,
+                        executedCommand: recoveryPlan.command,
+                        exitCode: lastResult.exitCode,
+                        rawTerminalOutput: lastResult.combinedOutput
+                    )
+                } catch {
+                    outputToShow = !lastResult.combinedOutput.isEmpty ? lastResult.combinedOutput : "Recovery command executed successfully."
                 }
-                UI.success("Recovery successful on attempt \(attempt)! Goal achieved.")
+
+                // Format 3: Display Output in separate color (Green)
+                UI.printOutput(outputToShow)
                 printPostState()
                 finalSuccess = true
                 return true
             }
 
-            UI.error("Fix command failed with code \(lastResult.exitCode)")
-            if !lastResult.combinedOutput.isEmpty {
-                print("\(UI.Style.brightRed)\(lastResult.combinedOutput)\(UI.Style.reset)")
-            }
+            // Show error from message again (Red)
+            let fixErrorMsg = !lastResult.combinedOutput.isEmpty ? lastResult.combinedOutput : "Fix command failed with code \(lastResult.exitCode)"
+            UI.printTerminalError(fixErrorMsg)
         }
 
         UI.error("Reached maximum retries (\(maxRetries)). Task could not be automatically resolved.")
