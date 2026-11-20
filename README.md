@@ -148,6 +148,108 @@ When `./localgit` is invoked from terminal or a Bash script:
 
 ---
 
+## 📦 How Swift Code Becomes the `localgit` Command (and Part of Your Shell)
+
+Many developers wonder: *“How does a folder with Swift files actually compile into a command called `localgit` and become a permanent part of my shell environment?”*
+
+Here is the exact anatomy of how `LocalGit` is declared, compiled into a named binary, and integrated into your terminal's `$PATH`:
+
+```mermaid
+flowchart TD
+    subgraph Step1["1. Defining the Command Name"]
+        Package["Package.swift / project.yml"] --> DefineProduct[".executable(name: 'localgit')\ntype: tool, PRODUCT_NAME: localgit"]
+    end
+
+    subgraph Step2["2. Compiling the Binary"]
+        DefineProduct --> SwiftBuild["swift build -c debug / release"]
+        SwiftBuild --> OutputBinary[".build/debug/localgit\n(Compiled ARM64 Mach-O Binary)"]
+    end
+
+    subgraph Step3["3. Making It Part of Your Shell ($PATH)"]
+        OutputBinary --> LauncherScript["localgit (Launcher in Repo Root)"]
+        LauncherScript --> Symlink["Symlink into ~/.local/bin/localgit"]
+        Symlink --> ShellPATH["$PATH Lookup (/Users/abhiraj/.local/bin)"]
+    end
+
+    subgraph Step4["4. Terminal Invocation & Auto-Rebuild"]
+        UserRuns["User runs: 'localgit' anywhere in terminal"] --> ShellPATH
+        ShellPATH --> CheckTimestamp{"Any file in Sources/ newer than binary?"}
+        CheckTimestamp -- "Code Changed" --> Rebuild["Auto-runs 'swift build'"]
+        CheckTimestamp -- "No Changes" --> ExecDirect["Immediate Execution"]
+        Rebuild --> ExecDirect
+        ExecDirect --> RunInPWD["Runs inside caller's current directory ($PWD)"]
+    end
+```
+
+### 1. Declaring the Binary in `Package.swift` and Xcode
+The command name `localgit` is not arbitrary; it is explicitly defined as an executable product in `Package.swift`:
+```swift
+products: [
+    // Declares that building this package produces an executable named 'localgit'
+    .executable(name: "localgit", targets: ["LocalGitCLI"])
+],
+targets: [
+    .target(name: "LocalGitCore", path: "Sources/LocalGitCore"),
+    .executableTarget(name: "LocalGitCLI", dependencies: ["LocalGitCore"], path: "Sources/LocalGitCLI")
+]
+```
+Similarly, in `project.yml` for Xcode:
+```yaml
+targets:
+  localgit:
+    type: tool
+    platform: macOS
+    settings:
+      PRODUCT_NAME: localgit
+```
+When `swift build` runs, SwiftPM compiles all code in `Sources/LocalGitCore` and `Sources/LocalGitCLI` and emits an executable file named `localgit` in `.build/debug/localgit`.
+
+### 2. How the Command Becomes Part of Your Shell (`$PATH`)
+When you type a command in terminal (like `git`, `ls`, or `localgit`), your shell (`bash` or `zsh`) does not search the entire disk. It looks through directories listed in the `$PATH` environment variable:
+```bash
+$ echo $PATH
+/Users/abhiraj/.local/bin:/usr/local/bin:/usr/bin:/bin:...
+```
+To make `localgit` accessible globally as a first-class shell command:
+```bash
+ln -sf /Users/abhiraj/Documents/harness/localgit ~/.local/bin/localgit
+```
+Because `~/.local/bin` is in `$PATH`, the shell instantly recognizes `localgit` as a native system command from any directory.
+
+### 3. The Auto-Compilation Bridge ([localgit](file:///Users/abhiraj/Documents/harness/localgit))
+The script at `localgit` connects the user's terminal to the compiled Swift binary and automates rebuilds:
+```bash
+#!/bin/bash
+set -e
+
+# 1. Resolve physical path even through symlinks (~/.local/bin/localgit -> harness/localgit)
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+PROJECT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+BIN="$PROJECT_DIR/.build/debug/localgit"
+
+# 2. Check if Swift source files have changed since the last compilation
+if [ ! -f "$BIN" ] || [ -n "$(find "$PROJECT_DIR/Sources" -newer "$BIN" 2>/dev/null)" ]; then
+    (cd "$PROJECT_DIR" && swift build -c debug >/dev/null)
+fi
+
+# 3. Hand over execution to the compiled Mach-O binary in the caller's current directory
+exec "$BIN" "$@"
+```
+
+### 4. What Happens When You Type `localgit` in Any Folder?
+1. **Lookup**: You run `localgit "create branch dev"`. The shell looks in `$PATH` and finds `~/.local/bin/localgit`.
+2. **Symlink Resolution**: The script resolves the symlink to find the real project directory (`/Users/abhiraj/Documents/harness`).
+3. **Freshness Check**: It compares modification dates. If you just edited `Sources/LocalGitCore/AgentEngine.swift`, it automatically triggers `swift build` so your changes take effect immediately.
+4. **Context Preservation**: `exec "$BIN" "$@"` replaces the shell process with the compiled Swift binary while keeping the **caller's `$PWD` (current working directory)**. This ensures `localgit` inspects and acts on the repository you are currently working in!
+
+---
+
 ## 🔬 Under the Hood: How Swift Code Executes Terminal Commands
 
 This section explains the exact engineering mechanisms that bridge the high-level Swift codebase down to native terminal commands and process management.
